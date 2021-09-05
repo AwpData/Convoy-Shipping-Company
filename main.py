@@ -1,4 +1,5 @@
 import json
+import math
 import re
 import sqlite3
 
@@ -48,14 +49,15 @@ if file_name[1] != "s3db":  # Finally, we can start the conversion to the databa
                         vehicle_id INTEGER PRIMARY KEY,
                         engine_capacity INTEGER NOT NULL,
                         fuel_consumption INTEGER NOT NULL,
-                        maximum_load INTEGER NOT NULL);""")
+                        maximum_load INTEGER NOT NULL,
+                        score INTEGER NOT NULL);""")
 
     # Remove the headers since the database already has properly named columns
     file_no_headers = my_df.to_csv("{}.csv".format(non_checked_name + "[NO HEADER]"), index=None, header=False)
     with conn:  # This will Insert each line into the database into their respective columns
         for line in open("{}[NO HEADER].csv".format(non_checked_name), "r"):
             properties = line.split(",")
-            conn.execute("INSERT OR IGNORE INTO convoy VALUES (?, ?, ?, ?)",
+            conn.execute("INSERT OR IGNORE INTO convoy VALUES (?, ?, ?, ?, 0)",
                          (int(properties[0]), int(properties[1]), int(properties[2]), int(properties[3].strip("\n"))))
 
     # Get the number of rows
@@ -64,41 +66,50 @@ if file_name[1] != "s3db":  # Finally, we can start the conversion to the databa
 
 with conn:  # Get the values in each row in the database
     data = conn.execute("SELECT * FROM convoy").fetchall()
-
+    for line in data:
+        total_gas = line[1]
+        fuel_consumption = line[2]
+        total_fills = math.floor((450 / ((total_gas / fuel_consumption) * 100)))
+        score = 0
+        score += 2 if line[3] >= 20 else 0  # Scoring for weight
+        score += 1 if total_fills == 1 else 2 if total_fills == 0 else 0  # Scoring for pit stops
+        score += 2 if 4.5 * fuel_consumption <= 230 else 1  # Scoring for fuel burned
+        conn.execute("UPDATE convoy SET score = ? WHERE vehicle_id = ?", (score, line[0]))  # Update score in database
+    data = conn.execute("SELECT * FROM convoy").fetchall()  # Update data again
 conn.close()
 
-#  Dictionary will be used for JSON and XML
-dict_ = dict()
-dict_["convoy"] = []
-for line in data:
-    dict_["convoy"].append(
-        {"vehicle_id": line[0],
-         "engine_capacity": line[1],
-         "fuel_consumption": line[2],
-         "maximum_load": line[3]})
-
-# Export everything to json file
+# Export everything to json file (If their score is > 3)
 with open("{}.json".format(non_checked_name), "w") as json_file:
+    dict_ = dict()
+    dict_["convoy"] = []
+    for line in data:
+        if line[4] > 3:
+            dict_["convoy"].append(
+                {"vehicle_id": line[0],
+                 "engine_capacity": line[1],
+                 "fuel_consumption": line[2],
+                 "maximum_load": line[3]})
+
     json.dump(dict_, json_file)
     print("{} vehicle{} saved into {}.json".format(len(dict_["convoy"]),
-                                                   " was " if len(dict_["convoy"]) == 1 else "s were",
-                                                   non_checked_name))
+                                                   " was" if len(dict_["convoy"]) == 1 else "s were", non_checked_name))
 
-# Now write it to an xml file
-root = "<convoy>"
-for entry in dict_["convoy"]:
-    root += "<vehicle>"
-    root += "<vehicle_id>{}</vehicle_id>".format(entry["vehicle_id"])
-    root += "<engine_capacity>{}</engine_capacity>".format(entry["engine_capacity"])
-    root += "<fuel_consumption>{}</fuel_consumption>".format(entry["fuel_consumption"])
-    root += "<maximum_load>{}</maximum_load>".format(entry["fuel_consumption"])
-    root += "</vehicle>"
+# Now write it to an xml file (ONLY if their score <= 3)
+root = "<convoy> "
+counter = 0
+for line in data:
+    if line[4] <= 3:
+        root += "<vehicle>"
+        root += "<vehicle_id>{}</vehicle_id>".format(line[0])
+        root += "<engine_capacity>{}</engine_capacity>".format(line[1])
+        root += "<fuel_consumption>{}</fuel_consumption>".format(line[2])
+        root += "<maximum_load>{}</maximum_load>".format(line[3])
+        root += "</vehicle>"
+        counter += 1
 root += "</convoy>"
 
 root = etree.fromstring(root)
 element_tree = etree.ElementTree(root)
 element_tree.write("{}.xml".format(non_checked_name))
 
-print("{} vehicle{} saved into {}.xml".format(len(dict_["convoy"]),
-                                              " was " if len(dict_["convoy"]) == 1 else "s were",
-                                              non_checked_name))
+print("{} vehicle{} saved into {}.xml".format(counter, " was" if counter == 1 else "s were", non_checked_name))
